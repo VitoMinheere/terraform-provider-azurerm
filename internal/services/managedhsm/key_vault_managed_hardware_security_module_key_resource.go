@@ -46,8 +46,14 @@ type KeyVaultMHSMKeyResourceSchema struct {
 	Curve          string                 `tfschema:"curve"`
 	NotBeforeDate  string                 `tfschema:"not_before_date"`
 	ExpirationDate string                 `tfschema:"expiration_date"`
+	ReleasePolicy  []ReleasePolicy        `tfschema:"release_policy"`
 	Tags           map[string]interface{} `tfschema:"tags"`
 	VersionedId    string                 `tfschema:"versioned_id"`
+}
+
+type ReleasePolicy struct {
+	Json      string `tfschema:"json"`
+	Immutable bool   `tfschema:"immutable"`
 }
 
 func (r KeyVaultMHSMKeyResource) IDValidationFunc() pluginsdk.SchemaValidateFunc {
@@ -142,6 +148,28 @@ func (r KeyVaultMHSMKeyResource) Arguments() map[string]*pluginsdk.Schema {
 			ValidateFunc: validation.IsRFC3339Time,
 		},
 
+		"release_policy": {
+			Type:     pluginsdk.TypeList,
+			Optional: true,
+			MaxItems: 1,
+			Elem: &pluginsdk.Resource{
+				Schema: map[string]*pluginsdk.Schema{
+					"json": {
+						Type:             pluginsdk.TypeString,
+						Required:         true,
+						ValidateFunc:     validation.StringIsJSON,
+						DiffSuppressFunc: pluginsdk.SuppressJsonDiff,
+					},
+
+					"immutable": {
+						Type:     pluginsdk.TypeBool,
+						Optional: true,
+						Default:  false,
+					},
+				},
+			},
+		},
+
 		"tags": commonschema.Tags(),
 	}
 }
@@ -172,7 +200,37 @@ func (r KeyVaultMHSMKeyResource) CustomizeDiff() sdk.ResourceFunc {
 
 			// if any value has changed, we need to SetNewComputed on versioned_id as any change to the key is a new version
 			if diff.HasChanges("key_opts", "not_before_date", "tags", "expiration_date") {
-				return diff.SetNewComputed("versioned_id")
+				if err := diff.SetNewComputed("versioned_id"); err != nil {
+					return err
+				}
+			}
+
+			if v, ok := diff.GetOk("release_policy"); ok && len(v.([]interface{})) > 0 {
+				keyType := diff.Get("key_type").(string)
+				if keyType != string(keyvault.JSONWebKeyTypeRSAHSM) && keyType != string(keyvault.JSONWebKeyTypeECHSM) {
+					return fmt.Errorf("`key_type` must be `RSA-HSM` or `EC-HSM` when `release_policy` is specified")
+				}
+			}
+
+			// the release policy content can only be updated in place while it is not immutable, and it can never be
+			// made mutable again once it has been marked immutable
+			if diff.Id() != "" {
+				if diff.HasChange("release_policy.0.json") && !diff.HasChange("release_policy.0.immutable") {
+					if diff.Get("release_policy.0.immutable").(bool) {
+						if err := diff.ForceNew("release_policy.0.json"); err != nil {
+							return err
+						}
+					}
+				}
+
+				if diff.HasChange("release_policy.0.immutable") {
+					old, new := diff.GetChange("release_policy.0.immutable")
+					if old.(bool) && !new.(bool) {
+						if err := diff.ForceNew("release_policy.0.immutable"); err != nil {
+							return err
+						}
+					}
+				}
 			}
 
 			return nil
@@ -263,6 +321,12 @@ func (r KeyVaultMHSMKeyResource) Create() sdk.ResourceFunc {
 				expirationDate, _ := time.Parse(time.RFC3339, config.ExpirationDate) // validated by schema
 				expirationUnixTime := date.UnixTime(expirationDate)
 				parameters.KeyAttributes.Expires = &expirationUnixTime
+			}
+
+			if len(config.ReleasePolicy) > 0 {
+				parameters.ReleasePolicy = expandReleasePolicy(config.ReleasePolicy)
+				// the key must be exportable when a release policy is provided
+				parameters.KeyAttributes.Exportable = pointer.To(true)
 			}
 
 			if resp, err := client.CreateKey(ctx, endpoint.BaseURI(), config.Name, parameters); err != nil {
@@ -358,6 +422,12 @@ func (r KeyVaultMHSMKeyResource) Read() sdk.ResourceFunc {
 						schema.ExpirationDate = time.Time(*v).Format(time.RFC3339)
 					}
 				}
+
+				releasePolicy, err := flattenReleasePolicy(resp.ReleasePolicy)
+				if err != nil {
+					return fmt.Errorf("flattening `release_policy`: %+v", err)
+				}
+				schema.ReleasePolicy = releasePolicy
 			}
 
 			return metadata.Encode(&schema)
@@ -413,6 +483,10 @@ func (r KeyVaultMHSMKeyResource) Update() sdk.ResourceFunc {
 				expirationDate, _ := time.Parse(time.RFC3339, config.ExpirationDate) // validated by schema
 				expirationUnixTime := date.UnixTime(expirationDate)
 				parameters.KeyAttributes.Expires = &expirationUnixTime
+			}
+
+			if metadata.ResourceData.HasChange("release_policy") {
+				parameters.ReleasePolicy = expandReleasePolicy(config.ReleasePolicy)
 			}
 
 			resp, err := client.UpdateKey(ctx, id.BaseUri(), config.Name, "", parameters)
@@ -529,4 +603,38 @@ func flattenKeyVaultKeyOptions(input *[]string) []string {
 	}
 
 	return append(results, *input...)
+}
+
+func expandReleasePolicy(input []ReleasePolicy) *keyvault.KeyReleasePolicy {
+	if len(input) == 0 {
+		return nil
+	}
+
+	policy := input[0]
+	return &keyvault.KeyReleasePolicy{
+		EncodedPolicy: pointer.To(base64.StdEncoding.EncodeToString([]byte(policy.Json))),
+		Immutable:     pointer.To(policy.Immutable),
+	}
+}
+
+func flattenReleasePolicy(input *keyvault.KeyReleasePolicy) ([]ReleasePolicy, error) {
+	if input == nil {
+		return []ReleasePolicy{}, nil
+	}
+
+	policyJson := ""
+	if input.EncodedPolicy != nil {
+		decoded, err := base64.RawURLEncoding.DecodeString(*input.EncodedPolicy)
+		if err != nil {
+			return nil, fmt.Errorf("decoding `release_policy`: %+v", err)
+		}
+		policyJson = string(decoded)
+	}
+
+	return []ReleasePolicy{
+		{
+			Json:      policyJson,
+			Immutable: pointer.From(input.Immutable),
+		},
+	}, nil
 }

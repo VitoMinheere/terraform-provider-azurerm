@@ -88,7 +88,19 @@ The following arguments are supported:
 
 * `expiration_date` - (Optional) Expiration UTC datetime (Y-m-d'T'H:M:S'Z'). When this parameter gets changed on reruns, if newer date is ahead of current date, an update is performed. If the newer date is before the current date, resource will be force created.
 
+* `release_policy` - (Optional) A `release_policy` block as defined below. This field can only be set when `key_type` is `RSA-HSM` or `EC-HSM`.
+
 * `tags` - (Optional) A mapping of tags to assign to the resource.
+
+---
+
+A `release_policy` block supports the following:
+
+* `json` - (Required) The release policy for this Key Vault Managed Hardware Security Module Key, as an escaped JSON string that describes the conditions under which the key can be released.
+
+* `immutable` - (Optional) Should the release policy be marked as immutable? Once marked as immutable, it can never be reset and no further changes can be made to the `json` field. Defaults to `false`.
+
+~> **Note:** Marking `immutable` as `true` is permanent - once applied it cannot be undone, and any further changes to `json` will force a new resource to be created.
 
 ## Attributes Reference
 
