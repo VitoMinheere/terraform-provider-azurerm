@@ -100,7 +100,9 @@ A `release_policy` block supports the following:
 
 * `immutable` - (Optional) Should the release policy be marked as immutable? Once marked as immutable, it can never be reset and no further changes can be made to the `json` field. Defaults to `false`.
 
-~> **Note:** Marking `immutable` as `true` is permanent - once applied it cannot be undone, and any further changes to `json` will force a new resource to be created.
+!> **Note:** Marking `immutable` as `true` is permanent - once applied it cannot be undone, and any further changes to `json` will force a new resource to be created.
+
+~> **Note:** A `release_policy` can't be removed from an existing key, so removing the `release_policy` block forces a new resource to be created. If `purge_soft_deleted_hardware_security_module_keys_on_destroy` is disabled, or the Managed HSM has purge protection enabled, the recreated key will be recovered from the soft-deleted key and keep its release policy.
 
 ## Attributes Reference
 

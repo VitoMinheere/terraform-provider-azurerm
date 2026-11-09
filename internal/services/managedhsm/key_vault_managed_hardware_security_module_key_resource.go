@@ -6,6 +6,7 @@ package managedhsm
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -208,13 +209,24 @@ func (r KeyVaultMHSMKeyResource) CustomizeDiff() sdk.ResourceFunc {
 			if v, ok := diff.GetOk("release_policy"); ok && len(v.([]any)) > 0 {
 				keyType := diff.Get("key_type").(string)
 				if keyType != string(keyvault.JSONWebKeyTypeRSAHSM) && keyType != string(keyvault.JSONWebKeyTypeECHSM) {
-					return fmt.Errorf("`key_type` must be `RSA-HSM` or `EC-HSM` when `release_policy` is specified")
+					return errors.New("`key_type` must be `RSA-HSM` or `EC-HSM` when `release_policy` is specified")
 				}
 			}
 
 			// the release policy content can only be updated in place while it is not immutable, and it can never be
 			// made mutable again once it has been marked immutable
 			if diff.Id() != "" {
+				// the key update API is a PATCH which omits a nil release policy, so a release policy can't be removed
+				// from an existing key - we'll recreate the resource when it is removed from config
+				if diff.HasChange("release_policy") {
+					oldValue, newValue := diff.GetChange("release_policy")
+					if len(oldValue.([]any)) > 0 && len(newValue.([]any)) == 0 {
+						if err := diff.ForceNew("release_policy"); err != nil {
+							return err
+						}
+					}
+				}
+
 				if diff.HasChange("release_policy.0.json") && !diff.HasChange("release_policy.0.immutable") {
 					if diff.Get("release_policy.0.immutable").(bool) {
 						if err := diff.ForceNew("release_policy.0.json"); err != nil {
@@ -485,6 +497,8 @@ func (r KeyVaultMHSMKeyResource) Update() sdk.ResourceFunc {
 				parameters.ReleasePolicy = expandReleasePolicy(config.ReleasePolicy)
 			}
 
+			// the Key Vault data plane only offers a PATCH (`UpdateKey`) for updating a key - there is no PUT, since
+			// `CreateKey` always creates a new key version - fields which can't be cleared via PATCH are handled in CustomizeDiff
 			resp, err := client.UpdateKey(ctx, id.BaseUri(), config.Name, "", parameters)
 			if err != nil {
 				return err
